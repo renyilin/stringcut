@@ -1,6 +1,6 @@
 # Stringcut
 
-A small experiment where a paragraph of text behaves like cuttable paper.  Drag across the letters to slice the structure.
+An interactive text-cutting experiment. Drag across the letters to slice the text paragraph.
 
 [Try it here]()
 
