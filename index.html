@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cut Text</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at top, #f8f3ea 0%, #efe5d3 45%, #dac9a8 100%);
+      font-family: Georgia, serif;
+      cursor: crosshair;
+    }
+    #scene {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      margin: 0 auto;
+      overflow: hidden;
+      touch-action: none;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    #floor {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      height: 94px;
+      background:
+        linear-gradient(to bottom, rgba(92, 68, 44, 0.06), rgba(92, 68, 44, 0.16)),
+        repeating-linear-gradient(
+          -12deg,
+          rgba(111, 82, 53, 0.12) 0 10px,
+          rgba(157, 126, 90, 0.12) 10px 20px
+        );
+      border-top: 2px solid rgba(103, 77, 49, 0.22);
+      pointer-events: none;
+    }
+    #reset {
+      position: absolute;
+      top: 24px;
+      right: 24px;
+      z-index: 3;
+      padding: 10px 14px;
+      border: 1px solid rgba(74, 53, 31, 0.2);
+      background: rgba(255, 249, 239, 0.88);
+      color: #5a4530;
+      font: 600 13px/1 Georgia, serif;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      cursor: pointer;
+      backdrop-filter: blur(8px);
+    }
+    #reset.hidden {
+      display: none;
+    }
+    #reset:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    #letter-layer {
+      position: absolute;
+      inset: 0;
+    }
+    #scissor-layer {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+    }
+    #scissors {
+      position: absolute;
+      width: 84px;
+      height: auto;
+      pointer-events: none;
+      transform: translate(-50%, 0);
+      filter: drop-shadow(0 8px 10px rgba(73, 49, 28, 0.2));
+      opacity: 0;
+    }
+    #scissors.intro {
+      animation: scissorPulse 2.6s ease-in-out infinite;
+    }
+    #scissors.hidden {
+      opacity: 0;
+      animation: none;
+    }
+    @keyframes scissorPulse {
+      0%, 100% { opacity: 0.2; }
+      50% { opacity: 0.9; }
+    }
+    .letter {
+      position: absolute;
+      top: 0;
+      left: 0;
+      color: #3d352d;
+      font-size: 26px;
+      line-height: 1;
+      will-change: transform;
+      pointer-events: none;
+      text-shadow: 0 1px 0 rgba(255, 255, 255, 0.55);
+    }
+    .letter.space {
+      opacity: 0;
+    }
+    canvas {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+  <div id="scene">
+    <button id="reset" class="hidden" type="button">Reset Text</button>
+    <div id="letter-layer"></div>
+    <div id="scissor-layer">
+      <img id="scissors" src="scissor.svg" alt="" aria-hidden="true">
+    </div>
+    <canvas id="fx"></canvas>
+    <div id="floor"></div>
+  </div>
+
+  <script type="module">
+    import { prepareWithSegments, layoutWithLines } from './pretext.js';
+
+    const TEXT_LONG = `It was the best of times, it was the worst of times, it was the age of wisdom, it was the age of foolishness, it was the epoch of belief, it was the epoch of incredulity, it was the season of Light, it was the season of Darkness, it was the spring of hope, it was the winter of despair, we had everything before us, we had nothing before us, we were all going direct to Heaven, we were all going direct the other way – in short, the period was so far like the present period, that some of its noisiest authorities insisted on its being received, for good or for evil, in the superlative degree of comparison only.`
+    const TEXT_SHORT = `It was a bright cold day in April, and the clocks were striking thirteen. Winston Smith, his chin nuzzled into his breast in an effort to escape the vile wind, slipped quickly through the glass doors of Victory Mansions, though not quickly enough to prevent a swirl of gritty dust from entering along with him.`
+
+    function getText() {
+      return window.innerWidth < 600 ? TEXT_SHORT : TEXT_LONG;
+    }
+    const FONT = '26px Georgia';
+    const FONT_SIZE = 20;
+    const PARAGRAPH_WIDTH = 800;
+    const LINE_HEIGHT = 34;
+    const SIDE_PADDING = 30;
+    const TOP_PADDING = 52;
+    const BOTTOM_PADDING = 90;
+    const GRAVITY = 0.34;
+    const DAMPING = 0.990;
+    const AIR_DRAG = 0.002;
+    const BOUNCE = 0.18;
+    const FLOOR_FRICTION = 0.82;
+    const SOLVER_ITERATIONS = 8;
+    const CUT_RADIUS = 12;
+    const STROKE_FADE_MS = 180;
+    const STROKE_DIM_MS = 400;
+    const RETURN_DURATION_MS = 950;
+
+    const scene = document.getElementById('scene');
+    const letterLayer = document.getElementById('letter-layer');
+    const scissors = document.getElementById('scissors');
+    const resetButton = document.getElementById('reset');
+    const canvas = document.getElementById('fx');
+    const ctx = canvas.getContext('2d');
+    const measureCtx = document.createElement('canvas').getContext('2d');
+    measureCtx.font = FONT;
+
+    const segmenter = new Intl.Segmenter(undefined, { granularity: 'grapheme' });
+    let prepared = prepareWithSegments(getText(), FONT);
+
+    let particles = [];
+    let constraints = [];
+    let letterEls = [];
+    let strokePoints = [];
+    let lastCutTime = 0;
+    let pointerState = null;
+    let animationFrame = 0;
+    let firstCutDone = false;
+    let isReturning = false;
+    let returnTargets = [];
+    let returnStartedAt = 0;
+    let showConstraints = false;
+    let scissorHidden = false;
+
+    function getSceneMetrics() {
+      const rect = scene.getBoundingClientRect();
+      return {
+        width: rect.width,
+        height: rect.height,
+        floorY: rect.height - BOTTOM_PADDING
+      };
+    }
+
+    function resizeCanvas() {
+      const dpr = window.devicePixelRatio || 1;
+      const rect = scene.getBoundingClientRect();
+      canvas.width = Math.round(rect.width * dpr);
+      canvas.height = Math.round(rect.height * dpr);
+      canvas.style.width = `${rect.width}px`;
+      canvas.style.height = `${rect.height}px`;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    }
+
+    function getMaxWidth() {
+      return Math.min(PARAGRAPH_WIDTH, scene.getBoundingClientRect().width) - SIDE_PADDING * 2;
+    }
+
+    function graphemesOf(text) {
+      return [...segmenter.segment(text)].map((part) => part.segment);
+    }
+
+    function widthOf(text) {
+      return measureCtx.measureText(text).width;
+    }
+
+    function lineOffsetY(lineCount, totalHeight) {
+      const available = getSceneMetrics().floorY - totalHeight - TOP_PADDING;
+      return TOP_PADDING + Math.max(0, available * 0.18);
+    }
+
+    function clearLetters() {
+      for (const el of letterEls) el.remove();
+      letterEls = [];
+    }
+
+    function positionScissors(leftX, bottomY, paragraphWidth) {
+      scissors.style.left = `${leftX + paragraphWidth * 0.2}px`;
+      scissors.style.top = `${bottomY + 5}px`;
+    }
+
+    function showScissorsIntro() {
+      scissorHidden = false;
+      scissors.classList.remove('hidden');
+      scissors.classList.add('intro');
+    }
+
+    function hideScissors() {
+      if (scissorHidden) return;
+      scissorHidden = true;
+      scissors.classList.remove('intro');
+      scissors.classList.add('hidden');
+    }
+
+    function addConstraint(a, b, stiffness) {
+      const pa = particles[a];
+      const pb = particles[b];
+      const dx = (pb.x + pb.w * 0.5) - (pa.x + pa.w * 0.5);
+      const dy = (pb.y + LINE_HEIGHT * 0.5) - (pa.y + LINE_HEIGHT * 0.5);
+      constraints.push({
+        a,
+        b,
+        rest: Math.hypot(dx, dy),
+        stiffness,
+        cut: false
+      });
+    }
+
+    function buildParagraph() {
+      clearLetters();
+      particles = [];
+      constraints = [];
+
+      const layout = layoutWithLines(prepared, getMaxWidth(), LINE_HEIGHT);
+      const totalHeight = Math.max(layout.height, LINE_HEIGHT);
+      const baseY = lineOffsetY(layout.lineCount, totalHeight);
+      const lineParticles = [];
+      const paragraphLeft = (getSceneMetrics().width - (getMaxWidth() + SIDE_PADDING * 2)) * 0.5 + SIDE_PADDING;
+      const paragraphWidth = getMaxWidth();
+      const paragraphBottomY = baseY + Math.max(0, layout.lineCount - 1) * LINE_HEIGHT + LINE_HEIGHT;
+
+      positionScissors(paragraphLeft, paragraphBottomY, paragraphWidth);
+
+      for (let lineIndex = 0; lineIndex < layout.lines.length; lineIndex++) {
+        const line = layout.lines[lineIndex];
+        const graphemes = graphemesOf(line.text);
+        const indices = [];
+        let x = paragraphLeft;
+        const y = baseY + lineIndex * LINE_HEIGHT;
+
+        for (let i = 0; i < graphemes.length; i++) {
+          const ch = graphemes[i];
+          const w = widthOf(ch);
+          const particle = {
+            ch,
+            w,
+            x,
+            y,
+            px: x,
+            py: y,
+            homeX: x,
+            homeY: y,
+            pinned: false,
+            visible: true,
+            weight: Math.max(0.8, w / 12),
+            active: ch.trim().length > 0
+          };
+
+          const el = document.createElement('span');
+          el.className = `letter${particle.active ? '' : ' space'}`;
+          el.textContent = ch;
+          el.style.font = FONT;
+          letterLayer.appendChild(el);
+
+          particles.push(particle);
+          letterEls.push(el);
+          indices.push(particles.length - 1);
+          x += w;
+        }
+
+        lineParticles.push(indices);
+      }
+
+      const topLine = lineParticles[0] ?? [];
+      for (const index of topLine) {
+        const particle = particles[index];
+        if (!particle.active) continue;
+
+        const anchor = {
+          ch: '',
+          w: 0,
+          x: particle.x + particle.w * 0.5,
+          y: particle.y - LINE_HEIGHT * 0.9,
+          px: particle.x + particle.w * 0.5,
+          py: particle.y - LINE_HEIGHT * 0.9,
+          homeX: particle.x + particle.w * 0.5,
+          homeY: particle.y - LINE_HEIGHT * 0.9,
+          pinned: true,
+          visible: false,
+          weight: 0,
+          active: false
+        };
+
+        particles.push(anchor);
+        addConstraint(index, particles.length - 1, 0.9);
+      }
+
+      for (const indices of lineParticles) {
+        for (let i = 0; i < indices.length - 1; i++) {
+          addConstraint(indices[i], indices[i + 1], 1);
+          if (i < indices.length - 2) addConstraint(indices[i], indices[i + 2], 0.22);
+        }
+      }
+
+      for (let lineIndex = 0; lineIndex < lineParticles.length - 1; lineIndex++) {
+        const upper = lineParticles[lineIndex];
+        const lower = lineParticles[lineIndex + 1];
+        let lowerCursor = 0;
+        const connectedLower = new Set();
+
+        for (const upperIndex of upper) {
+          const upperParticle = particles[upperIndex];
+          if (!upperParticle.active) continue;
+
+          while (
+            lowerCursor < lower.length - 1 &&
+            particles[lower[lowerCursor]].x + particles[lower[lowerCursor]].w * 0.5 <
+              upperParticle.x + upperParticle.w * 0.5
+          ) {
+            lowerCursor++;
+          }
+
+          const candidates = [lower[lowerCursor - 1], lower[lowerCursor], lower[lowerCursor + 1]];
+          for (const candidate of candidates) {
+            if (candidate == null) continue;
+            if (!particles[candidate].active) continue;
+            const dx = Math.abs(
+              (particles[candidate].x + particles[candidate].w * 0.5) -
+              (upperParticle.x + upperParticle.w * 0.5)
+            );
+            if (dx < FONT_SIZE * 1.3) {
+              addConstraint(upperIndex, candidate, 0.62);
+              connectedLower.add(candidate);
+            }
+          }
+        }
+
+        // Connect unconnected end-of-line lower letters to the last upper letter
+        let lastUpperIndex = -1;
+        for (let i = upper.length - 1; i >= 0; i--) {
+          if (particles[upper[i]].active) { lastUpperIndex = upper[i]; break; }
+        }
+        if (lastUpperIndex >= 0) {
+          for (let i = lower.length - 1; i >= 0; i--) {
+            const lowerIndex = lower[i];
+            if (!particles[lowerIndex].active) continue;
+            if (connectedLower.has(lowerIndex)) break;
+            addConstraint(lastUpperIndex, lowerIndex, 0.62);
+          }
+        }
+      }
+    }
+
+    function pointToScene(event) {
+      const rect = scene.getBoundingClientRect();
+      return { x: event.clientX - rect.left, y: event.clientY - rect.top };
+    }
+
+    function lineIntersection(a1, a2, b1, b2) {
+      const r = { x: a2.x - a1.x, y: a2.y - a1.y };
+      const s = { x: b2.x - b1.x, y: b2.y - b1.y };
+      const denom = r.x * s.y - r.y * s.x;
+
+      if (Math.abs(denom) < 0.0001) return false;
+
+      const qp = { x: b1.x - a1.x, y: b1.y - a1.y };
+      const t = (qp.x * s.y - qp.y * s.x) / denom;
+      const u = (qp.x * r.y - qp.y * r.x) / denom;
+      return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+    }
+
+    function distancePointToSegment(point, a, b) {
+      const abx = b.x - a.x;
+      const aby = b.y - a.y;
+      const lenSq = abx * abx + aby * aby || 1;
+      const t = Math.max(0, Math.min(1, ((point.x - a.x) * abx + (point.y - a.y) * aby) / lenSq));
+      const projX = a.x + abx * t;
+      const projY = a.y + aby * t;
+      return Math.hypot(point.x - projX, point.y - projY);
+    }
+
+    function cutConstraint(index, strokeA, strokeB) {
+      const constraint = constraints[index];
+      if (constraint.cut) return false;
+
+      const pa = particles[constraint.a];
+      const pb = particles[constraint.b];
+      const a = { x: pa.x + pa.w * 0.5, y: pa.y + LINE_HEIGHT * 0.5 };
+      const b = { x: pb.x + pb.w * 0.5, y: pb.y + LINE_HEIGHT * 0.5 };
+
+      const hit =
+        lineIntersection(strokeA, strokeB, a, b) ||
+        distancePointToSegment(a, strokeA, strokeB) < CUT_RADIUS ||
+        distancePointToSegment(b, strokeA, strokeB) < CUT_RADIUS;
+
+      if (!hit) return false;
+
+      constraint.cut = true;
+      firstCutDone = true;
+      lastCutTime = performance.now();
+      resetButton.classList.remove('hidden');
+
+      if (!pa.pinned) pa.py -= 2.6;
+      if (!pb.pinned) pb.py -= 2.6;
+      return true;
+    }
+
+    function applyCut(strokeA, strokeB) {
+      let cutCount = 0;
+      for (let i = 0; i < constraints.length; i++) {
+        if (cutConstraint(i, strokeA, strokeB)) cutCount++;
+      }
+    }
+
+    function onPointerDown(event) {
+      if (isReturning) return;
+      hideScissors();
+      pointerState = pointToScene(event);
+      strokePoints = [{ ...pointerState, t: performance.now() }];
+    }
+
+    function onPointerMove(event) {
+      if (!pointerState || isReturning) return;
+      const next = pointToScene(event);
+      applyCut(pointerState, next);
+      strokePoints.push({ ...next, t: performance.now() });
+      pointerState = next;
+    }
+
+    function onPointerUp() {
+      pointerState = null;
+    }
+
+    function solveConstraints() {
+      for (let iter = 0; iter < SOLVER_ITERATIONS; iter++) {
+        for (const constraint of constraints) {
+          if (constraint.cut) continue;
+
+          const a = particles[constraint.a];
+          const b = particles[constraint.b];
+          const ax = a.x + a.w * 0.5;
+          const ay = a.y + LINE_HEIGHT * 0.5;
+          const bx = b.x + b.w * 0.5;
+          const by = b.y + LINE_HEIGHT * 0.5;
+          const dx = bx - ax;
+          const dy = by - ay;
+          const dist = Math.hypot(dx, dy) || 0.0001;
+          const diff = (dist - constraint.rest) / dist;
+          const stiffness = constraint.stiffness;
+
+          if (!a.pinned && !b.pinned) {
+            a.x += dx * diff * 0.5 * stiffness;
+            a.y += dy * diff * 0.5 * stiffness;
+            b.x -= dx * diff * 0.5 * stiffness;
+            b.y -= dy * diff * 0.5 * stiffness;
+          } else if (a.pinned && !b.pinned) {
+            b.x -= dx * diff * stiffness;
+            b.y -= dy * diff * stiffness;
+          } else if (!a.pinned && b.pinned) {
+            a.x += dx * diff * stiffness;
+            a.y += dy * diff * stiffness;
+          }
+        }
+      }
+    }
+
+    function easeInOutCubic(t) {
+      return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) * 0.5;
+    }
+
+    function collectReturnTargets() {
+      const targets = [];
+      let maxDist = 0;
+      for (let i = 0; i < particles.length; i++) {
+        const particle = particles[i];
+        if (!particle.visible) continue;
+        const dist = Math.hypot(particle.homeX - particle.x, particle.homeY - particle.y);
+        if (dist > maxDist) maxDist = dist;
+        targets.push({
+          index: i,
+          fromX: particle.x,
+          fromY: particle.y,
+          toX: particle.homeX,
+          toY: particle.homeY,
+          dist
+        });
+      }
+      for (const t of targets) {
+        t.duration = maxDist > 0 ? RETURN_DURATION_MS * (t.dist / maxDist) : 0;
+      }
+      return targets;
+    }
+
+    function beginReturn() {
+      if (isReturning || !firstCutDone) return;
+
+      returnTargets = collectReturnTargets();
+      if (returnTargets.length === 0) {
+        setupScene();
+        return;
+      }
+
+      isReturning = true;
+      returnStartedAt = performance.now();
+      pointerState = null;
+      strokePoints = [];
+      resetButton.disabled = true;
+      resetButton.classList.add('hidden');
+    }
+
+    function updateReturn(now) {
+      const elapsed = now - returnStartedAt;
+      let allDone = true;
+
+      for (const target of returnTargets) {
+        const progress = target.duration > 0 ? Math.min(1, elapsed / target.duration) : 1;
+        if (progress < 1) allDone = false;
+        const eased = easeInOutCubic(progress);
+        const particle = particles[target.index];
+        particle.x = target.fromX + (target.toX - target.fromX) * eased;
+        particle.y = target.fromY + (target.toY - target.fromY) * eased;
+        particle.px = particle.x;
+        particle.py = particle.y;
+      }
+
+      return allDone;
+    }
+
+    function integrate() {
+      const { width, floorY } = getSceneMetrics();
+
+      for (const particle of particles) {
+        if (particle.pinned) continue;
+
+        const vx = (particle.x - particle.px) * DAMPING * (1 - AIR_DRAG * particle.weight);
+        const vy = (particle.y - particle.py) * DAMPING * (1 - AIR_DRAG * particle.weight);
+
+        particle.px = particle.x;
+        particle.py = particle.y;
+        particle.x += vx;
+        particle.y += vy + GRAVITY * particle.weight;
+
+        if (particle.x < 0) {
+          particle.x = 0;
+          particle.px = particle.x + vx * -BOUNCE;
+        }
+        if (particle.x + particle.w > width) {
+          particle.x = width - particle.w;
+          particle.px = particle.x + vx * -BOUNCE;
+        }
+        if (particle.y + LINE_HEIGHT > floorY) {
+          particle.y = floorY - LINE_HEIGHT;
+          particle.py = particle.y + vy * -BOUNCE;
+          particle.px = particle.x - vx * FLOOR_FRICTION;
+        }
+      }
+    }
+
+    function renderFx(now) {
+      const { width, height } = getSceneMetrics();
+      ctx.clearRect(0, 0, width, height);
+
+      if (strokePoints.length > 1) {
+        const globalFade = pointerState ? 1 : Math.max(0, 1 - (now - lastCutTime) / STROKE_FADE_MS);
+        if (globalFade > 0) {
+          ctx.lineCap = 'round';
+          ctx.lineJoin = 'round';
+          ctx.lineWidth = 4;
+          for (let i = 1; i < strokePoints.length; i++) {
+            const age = now - strokePoints[i].t;
+            const dim = Math.max(0.08, 1 - age / STROKE_DIM_MS);
+            const alpha = dim * globalFade * 0.95;
+            if (alpha <= 0) continue;
+            ctx.strokeStyle = `rgba(146, 34, 24, ${alpha})`;
+            ctx.beginPath();
+            ctx.moveTo(strokePoints[i - 1].x, strokePoints[i - 1].y);
+            ctx.lineTo(strokePoints[i].x, strokePoints[i].y);
+            ctx.stroke();
+          }
+        } else {
+          strokePoints = [];
+        }
+      }
+
+      if (showConstraints) {
+        ctx.strokeStyle = 'rgba(140, 140, 140, 0.4)';
+        ctx.lineWidth = 1;
+        for (const constraint of constraints) {
+          if (constraint.cut) continue;
+          const a = particles[constraint.a];
+          const b = particles[constraint.b];
+          if (!a.active || !b.active) continue;
+          ctx.beginPath();
+          ctx.moveTo(a.x + a.w * 0.5, a.y + LINE_HEIGHT * 0.5);
+          ctx.lineTo(b.x + b.w * 0.5, b.y + LINE_HEIGHT * 0.5);
+          ctx.stroke();
+        }
+      }
+    }
+
+    function frame(now) {
+      if (isReturning) {
+        if (updateReturn(now)) {
+          resetState();
+        }
+      } else if (firstCutDone) {
+        integrate();
+        solveConstraints();
+      }
+
+      for (let i = 0; i < particles.length; i++) {
+        if (!particles[i].visible) continue;
+        letterEls[i].style.transform = `translate(${particles[i].x}px, ${particles[i].y}px)`;
+      }
+
+      renderFx(now);
+      animationFrame = requestAnimationFrame(frame);
+    }
+
+    function resetState() {
+      for (const c of constraints) c.cut = false;
+      for (const p of particles) {
+        p.x = p.homeX;
+        p.y = p.homeY;
+        p.px = p.homeX;
+        p.py = p.homeY;
+      }
+      strokePoints = [];
+      pointerState = null;
+      firstCutDone = false;
+      isReturning = false;
+      returnTargets = [];
+      returnStartedAt = 0;
+      resetButton.disabled = false;
+      resetButton.classList.add('hidden');
+      showScissorsIntro();
+    }
+
+    function setupScene() {
+      cancelAnimationFrame(animationFrame);
+      resizeCanvas();
+      prepared = prepareWithSegments(getText(), FONT);
+      buildParagraph();
+      strokePoints = [];
+      pointerState = null;
+      firstCutDone = false;
+      isReturning = false;
+      returnTargets = [];
+      returnStartedAt = 0;
+      resetButton.disabled = false;
+      showScissorsIntro();
+      animationFrame = requestAnimationFrame(frame);
+    }
+
+    scene.addEventListener('pointerdown', onPointerDown);
+    resetButton.addEventListener('click', beginReturn);
+    window.addEventListener('keydown', (event) => {
+      if (event.key === 'h' || event.key === 'H') showConstraints = !showConstraints;
+    });
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    window.addEventListener('resize', () => {
+      if (!firstCutDone) setupScene();
+      else resizeCanvas();
+    });
+
+    setupScene();
+  </script>
+</body>
+</html>
