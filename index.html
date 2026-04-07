@@ -150,7 +150,8 @@
     const CUT_RADIUS = 12;
     const STROKE_FADE_MS = 180;
     const STROKE_DIM_MS = 400;
-    const RETURN_DURATION_MS = 950;
+    const RETURN_DURATION_MS = 1100;
+    const MIN_RETURN_DURATION_RATIO = 0.6;
 
     const scene = document.getElementById('scene');
     const letterLayer = document.getElementById('letter-layer');
@@ -521,7 +522,15 @@
         });
       }
       for (const t of targets) {
-        t.duration = maxDist > 0 ? RETURN_DURATION_MS * (t.dist / maxDist) : 0;
+        if (maxDist <= 0) {
+          t.duration = 0;
+          continue;
+        }
+
+        const normalizedDist = t.dist / maxDist;
+        const durationRatio =
+          MIN_RETURN_DURATION_RATIO + (1 - MIN_RETURN_DURATION_RATIO) * normalizedDist;
+        t.duration = RETURN_DURATION_MS * durationRatio;
       }
       return targets;
     }
