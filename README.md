@@ -2,7 +2,7 @@
 
 An interactive text-cutting experiment. Drag across the letters to slice the text paragraph.
 
-[Try it here]()
+[Try it here](https://renyilin.github.io/stringcut/)
 
 ## Credits
 - Inspired by [textstring](https://github.com/pushmatrix/textstring)
